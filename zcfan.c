@@ -148,6 +148,42 @@ static int read_temp_file(const char *filename) {
     return val;
 }
 
+struct TempStats {
+    int avg;
+    int max;
+};
+
+static struct TempStats get_avg_and_max_temp(void) {
+    // int temps[temp_files.gl_pathc];
+    int count = 0;
+    int max_temp = TEMP_INVALID;
+    int sum = 0;
+
+    for (size_t i = 0; i < temp_files.gl_pathc; ++i) {
+        int t = read_temp_file(temp_files.gl_pathv[i]);
+        if (t != TEMP_INVALID) {
+            // temps[count++] = t;
+            count++;
+            sum += t;
+            if (t > max_temp) {
+                max_temp = t;
+            }
+        }
+    }
+
+    if (count == 0) {
+        err("Couldn't find any valid temperature\n");
+        exit_if_first_tick();
+        return (struct TempStats){.avg = TEMP_INVALID, .max = TEMP_INVALID};
+    }
+
+    return (struct TempStats){
+        .avg = MILLIC_TO_C(sum / count),
+        .max = MILLIC_TO_C(max_temp),
+    };
+}
+
+
 static int get_max_temp(void) {
     int max_temp = TEMP_INVALID;
 
@@ -207,6 +243,7 @@ enum set_fan_status {
 };
 
 static enum set_fan_status set_fan_level(void) {
+    struct TempStats temps = get_avg_and_max_temp();
     int max_temp = get_max_temp(), temp_penalty = 0;
     static unsigned int tick_penalty = tick_hysteresis;
 
@@ -230,13 +267,11 @@ static enum set_fan_status set_fan_level(void) {
             temp_penalty = temp_hysteresis;
         }
 
-        if (rule->threshold < temp_penalty ||
-            (rule->threshold - temp_penalty) < max_temp) {
+        if (rule->threshold < temp_penalty || ((rule->threshold - temp_penalty) < temps.avg)) {
             if (rule != current_rule) {
                 current_rule = rule;
                 tick_penalty = tick_hysteresis;
-                printf("[FAN] Temperature now %dC, fan set to %s\n", max_temp,
-                       rule->name);
+                printf("[FAN] Temp avg %dC, max %dC → fan set to %s\n", temps.avg, temps.max, rule->name);
                 write_fan_level(rule->tpacpi_level);
                 return FAN_LEVEL_SET;
             }
