@@ -36,7 +36,7 @@
 
 #define CONFIG_MAX_STRLEN 15
 #define S_CONFIG_MAX_STRLEN STR(CONFIG_MAX_STRLEN)
-#define TEMP_BUFFER_SIZE 5  /* Smooth temperature readings over 5 seconds */
+#define DEFAULT_TEMP_BUFFER_SIZE 5  /* Smooth temperature readings over 5 seconds */
 
 /* Must be highest to lowest temp */
 enum FanLevel { FAN_MAX, FAN_MED, FAN_LOW, FAN_OFF, FAN_INVALID };
@@ -55,6 +55,7 @@ static struct Rule rules[] = {
 static struct timespec last_watchdog_ping = {0, 0};
 static time_t watchdog_secs = DEFAULT_WATCHDOG_SECS;
 static int temp_hysteresis = 10;
+static int temp_buffer_size = DEFAULT_TEMP_BUFFER_SIZE;
 static const unsigned int tick_hysteresis = 3;
 static char output_buf[512];
 static const struct Rule *current_rule = NULL;
@@ -63,7 +64,7 @@ static volatile sig_atomic_t pending_sleep = 0;
 static volatile sig_atomic_t pending_resume = 0;
 static int first_tick = 1; /* Stop running if errors are immediate */
 static glob_t temp_files;
-static int temp_buffer[TEMP_BUFFER_SIZE] = {0};
+static int *temp_buffer = NULL;
 static size_t temp_buffer_idx = 0;
 static int temp_buffer_filled = 0;  /* Track if buffer is full */
 
@@ -178,16 +179,16 @@ static int get_smoothed_temp(void) {
     
     /* Add current reading to circular buffer */
     temp_buffer[temp_buffer_idx] = current_temp;
-    temp_buffer_idx = (temp_buffer_idx + 1) % TEMP_BUFFER_SIZE;
+    temp_buffer_idx = (temp_buffer_idx + 1) % (size_t)temp_buffer_size;
     
-    /* Mark buffer as filled once we have TEMP_BUFFER_SIZE readings */
+    /* Mark buffer as filled once we have temp_buffer_size readings */
     if (!temp_buffer_filled && temp_buffer_idx == 0) {
         temp_buffer_filled = 1;
     }
     
     /* Calculate average of available readings */
     int sum = 0;
-    size_t count = temp_buffer_filled ? TEMP_BUFFER_SIZE : temp_buffer_idx;
+    size_t count = temp_buffer_filled ? (size_t)temp_buffer_size : temp_buffer_idx;
     
     for (size_t i = 0; i < count; i++) {
         sum += temp_buffer[i];
@@ -346,6 +347,7 @@ static void get_config(void) {
         fscanf_int_for_key(f, pos, "low_temp", rules[FAN_LOW].threshold);
         fscanf_int_for_key(f, pos, "watchdog_secs", watchdog_secs);
         fscanf_int_for_key(f, pos, "temp_hysteresis", temp_hysteresis);
+        fscanf_int_for_key(f, pos, "temp_buffer_size", temp_buffer_size);
         fscanf_str_for_key(f, pos, "max_level", rules[FAN_MAX].tpacpi_level);
         fscanf_str_for_key(f, pos, "med_level", rules[FAN_MED].tpacpi_level);
         fscanf_str_for_key(f, pos, "low_level", rules[FAN_LOW].tpacpi_level);
@@ -360,6 +362,12 @@ static void get_config(void) {
         watchdog_secs > DEFAULT_WATCHDOG_SECS) {
         err("%s: value for the watchdog_secs directive has to be between %d and %d\n",
             CONFIG_PATH, WATCHDOG_GRACE_PERIOD_SECS, DEFAULT_WATCHDOG_SECS);
+        exit(1);
+    }
+
+    if (temp_buffer_size < 1) {
+        err("%s: value for the temp_buffer_size directive must be at least 1\n",
+            CONFIG_PATH);
         exit(1);
     }
 
@@ -422,6 +430,17 @@ int main(int argc, char *argv[]) {
     }
 
     write_watchdog_timeout(watchdog_secs);
+    
+    /* Allocate temperature buffer */
+    temp_buffer = malloc((size_t)temp_buffer_size * sizeof(int));
+    if (!temp_buffer) {
+        err("Failed to allocate temperature buffer\n");
+        exit(1);
+    }
+    for (int i = 0; i < temp_buffer_size; i++) {
+        temp_buffer[i] = 0;
+    }
+    
     populate_temp_files();
 
     int fan_control_enabled = 1;
@@ -455,6 +474,7 @@ int main(int argc, char *argv[]) {
     }
 
     globfree(&temp_files);
+    free(temp_buffer);
     printf("[FAN] Quit requested, reenabling thinkpad_acpi fan control\n");
     if (write_fan_level("auto") == 0) {
         write_watchdog_timeout(0);
