@@ -36,6 +36,7 @@
 
 #define CONFIG_MAX_STRLEN 15
 #define S_CONFIG_MAX_STRLEN STR(CONFIG_MAX_STRLEN)
+#define TEMP_BUFFER_SIZE 5  /* Smooth temperature readings over 5 seconds */
 
 /* Must be highest to lowest temp */
 enum FanLevel { FAN_MAX, FAN_MED, FAN_LOW, FAN_OFF, FAN_INVALID };
@@ -62,6 +63,9 @@ static volatile sig_atomic_t pending_sleep = 0;
 static volatile sig_atomic_t pending_resume = 0;
 static int first_tick = 1; /* Stop running if errors are immediate */
 static glob_t temp_files;
+static int temp_buffer[TEMP_BUFFER_SIZE] = {0};
+static size_t temp_buffer_idx = 0;
+static int temp_buffer_filled = 0;  /* Track if buffer is full */
 
 enum resume_state {
     RESUME_NOT_DETECTED,
@@ -165,6 +169,33 @@ static int get_max_temp(void) {
     return MILLIC_TO_C(max_temp);
 }
 
+static int get_smoothed_temp(void) {
+    int current_temp = get_max_temp();
+    
+    if (current_temp == TEMP_INVALID) {
+        return TEMP_INVALID;
+    }
+    
+    /* Add current reading to circular buffer */
+    temp_buffer[temp_buffer_idx] = current_temp;
+    temp_buffer_idx = (temp_buffer_idx + 1) % TEMP_BUFFER_SIZE;
+    
+    /* Mark buffer as filled once we have TEMP_BUFFER_SIZE readings */
+    if (!temp_buffer_filled && temp_buffer_idx == 0) {
+        temp_buffer_filled = 1;
+    }
+    
+    /* Calculate average of available readings */
+    int sum = 0;
+    size_t count = temp_buffer_filled ? TEMP_BUFFER_SIZE : temp_buffer_idx;
+    
+    for (size_t i = 0; i < count; i++) {
+        sum += temp_buffer[i];
+    }
+    
+    return count > 0 ? sum / (int)count : current_temp;
+}
+
 #define write_fan_level(level) write_fan("level", level)
 
 static int write_fan(const char *command, const char *value) {
@@ -207,7 +238,7 @@ enum set_fan_status {
 };
 
 static enum set_fan_status set_fan_level(void) {
-    int max_temp = get_max_temp(), temp_penalty = 0;
+    int max_temp = get_smoothed_temp(), temp_penalty = 0;
     static unsigned int tick_penalty = tick_hysteresis;
 
     if (tick_penalty > 0) {
